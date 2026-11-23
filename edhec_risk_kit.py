@@ -1,104 +1,65 @@
 import pandas as pd
 import numpy as np
+import tushare as ts
+import time as time
+def get_hs300_weight(start_year=2016,end_year=2026):
+    pro = ts.pro_api('8a4a1a62697c04aad61a689b7e0c73d0ab9cd7a720de7557667fe9b1')
+    dfs=[]
+    for year in range(start_year,end_year+1):
+        df = pro.index_weight(index_code='399300.SZ',start_date=f"{year}0101",end_date=f"{year}1231" )
+        if df is not None and not df.empty:
+            dfs.append(df)
+    dfs=pd.concat(dfs,ignore_index=True)
+    dfs=dfs.pivot(index="trade_date",columns="con_code",values="weight")
+    dfs=dfs.sort_index()
+    dfs.to_csv("data/hs300_weights.csv")
+    return dfs
 
-def get_ffme_returns():
-    """
-    Load the Fama-French Dataset for the returns of the Top and Bottom Deciles by MarketCap
-    """
-    me_m = pd.read_csv("data/Portfolios_Formed_on_ME_monthly_EW.csv",
-                       header=0, index_col=0, na_values=-99.99)
-    rets = me_m[['Lo 10', 'Hi 10']]
-    rets.columns = ['SmallCap', 'LargeCap']
-    rets = rets/100
-    rets.index = pd.to_datetime(rets.index, format="%Y%m").to_period('M')
-    return rets
+def read_hs300_weights():
+    hs300=pd.read_csv("data/hs300_weights.csv",index_col=0)
+    hs300.index=pd.to_datetime(hs300.index,format="%Y%m%d")
+    return hs300   
+def shrink_cov(returns):
+    returns=returns.drpna()
+    cov = returns.cov(ddof=0)
+    tp = np.diag(cov).mean()
+    mui = pd.DataFrame(np.eye(cov.shape[0]), index=cov.index, columns=cov.columns)
+    mui = mui * tp
+    cy = ((cov - mui) ** 2).to_numpy().sum()
+    T = returns.shape[0]
+    S = cov.to_numpy()
+    X = returns.to_numpy()
+    X = X - X.mean(axis=0)
+    jg = 0.0
+    N = len(cov)
+    for i in range(N):
+        for j in range(N):
+            daily = (X[:, i] * X[:, j] - S[i, j]) ** 2
+            jg += daily.sum()
+    jg = jg / T
+    delta = min(jg / (cy * T), 1.0)
+    cov_aj = (1 - delta) * cov + mui * delta
+    return cov_aj
+def get_returns(con_code,start_date,end_date):
+    n=len(con_code)
+    pro = ts.pro_api('8a4a1a62697c04aad61a689b7e0c73d0ab9cd7a720de7557667fe9b1')
+    dfs=[]
+    for i in range(0,n):
+        df = pro.daily(ts_code=con_code[i], start_date=start_date, end_date=end_date)
+        if df is not None and not df.empty:
+            dfs.append(df)
+        time.sleep(1.2)
+    dfs=pd.concat(dfs,ignore_index=True)
+    dfs=dfs.pivot(index="trade_date",columns="ts_code",values="pct_chg")
+    dfs=dfs.sort_index()/100
+    dfs.to_csv("data/hs300_returns_nearly.csv")
+    return dfs
 
-def get_fff_returns():
-    """
-    Load the Fama-French Research Factor Monthly Dataset
-    """
-    rets = pd.read_csv("data/F-F_Research_Data_Factors_m.csv",
-                       header=0, index_col=0, na_values=-99.99)/100
-    rets.index = pd.to_datetime(rets.index, format="%Y%m").to_period('M')
-    return rets
-
-
-def get_hfi_returns():
-    """
-    Load and format the EDHEC Hedge Fund Index Returns
-    """
-    hfi = pd.read_csv("data/edhec-hedgefundindices.csv",
-                      header=0, index_col=0, parse_dates=True)
-    hfi = hfi/100
-    hfi.index = hfi.index.to_period('M')
-    return hfi
-
-def get_ind_file(filetype, weighting="vw", n_inds=30):
-    """
-    Load and format the Ken French Industry Portfolios files
-    Variant is a tuple of (weighting, size) where:
-        weighting is one of "ew", "vw"
-        number of inds is 30 or 49
-    """    
-    if filetype is "returns":
-        name = f"{weighting}_rets" 
-        divisor = 100
-    elif filetype is "nfirms":
-        name = "nfirms"
-        divisor = 1
-    elif filetype is "size":
-        name = "size"
-        divisor = 1
-    else:
-        raise ValueError(f"filetype must be one of: returns, nfirms, size")
+def read_returns():
+    returns=pd.read_csv("data/hs300_returns_nearly.csv",index_col=0)
+    returns.index=pd.to_datetime(returns.index,format="%Y%m%d")
+    return returns 
     
-    ind = pd.read_csv(f"data/ind{n_inds}_m_{name}.csv", header=0, index_col=0, na_values=-99.99)/divisor
-    ind.index = pd.to_datetime(ind.index, format="%Y%m").to_period('M')
-    ind.columns = ind.columns.str.strip()
-    return ind
-
-def get_ind_returns(weighting="vw", n_inds=30):
-    """
-    Load and format the Ken French Industry Portfolios Monthly Returns
-    """
-    return get_ind_file("returns", weighting=weighting, n_inds=n_inds)
-
-def get_ind_nfirms(n_inds=30):
-    """
-    Load and format the Ken French 30 Industry Portfolios Average number of Firms
-    """
-    return get_ind_file("nfirms", n_inds=n_inds)
-
-def get_ind_size(n_inds=30):
-    """
-    Load and format the Ken French 30 Industry Portfolios Average size (market cap)
-    """
-    return get_ind_file("size", n_inds=n_inds)
-
-
-def get_ind_market_caps(n_inds=30, weights=False):
-    """
-    Load the industry portfolio data and derive the market caps
-    """
-    ind_nfirms = get_ind_nfirms(n_inds=n_inds)
-    ind_size = get_ind_size(n_inds=n_inds)
-    ind_mktcap = ind_nfirms * ind_size
-    if weights:
-        total_mktcap = ind_mktcap.sum(axis=1)
-        ind_capweight = ind_mktcap.divide(total_mktcap, axis="rows")
-        return ind_capweight
-    #else
-    return ind_mktcap
-
-def get_total_market_index_returns(n_inds=30):
-    """
-    Load the 30 industry portfolio data and derive the returns of a capweighted total market index
-    """
-    ind_capweight = get_ind_market_caps(n_inds=n_inds)
-    ind_return = get_ind_returns(weighting="vw", n_inds=n_inds)
-    total_market_return = (ind_capweight * ind_return).sum(axis="columns")
-    return total_market_return
-                         
 def skewness(r):
     """
     Alternative to scipy.stats.skew()
@@ -258,10 +219,6 @@ def var_gaussian(r, level=5, modified=False):
 
 
 def portfolio_return(weights, returns):
-    """
-    Computes the return on a portfolio from constituent returns and weights
-    weights are a numpy array or Nx1 matrix and returns are a numpy array or Nx1 matrix
-    """
     return weights.T @ returns
 
 
@@ -606,7 +563,7 @@ def weight_cw(r, cap_weights, **kwargs):
     w = cap_weights.loc[r.index[1]]
     return w/w.sum()
 
-def backtest_ws(r, estimation_window=60, weighting=weight_ew, verbose=False, **kwargs):
+def backtest_ws(r, estimation_window=60, weighting=weight_ew, **kwargs):
     """
     Backtests a given weighting scheme, given some parameters:
     r : asset returns to use to build the portfolio
