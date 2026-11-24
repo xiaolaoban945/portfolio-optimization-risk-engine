@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import tushare as ts
 import time as time
+import cvxpy as cp
 def get_hs300_weight(start_year=2016,end_year=2026):
     pro = ts.pro_api('8a4a1a62697c04aad61a689b7e0c73d0ab9cd7a720de7557667fe9b1')
     dfs=[]
@@ -20,7 +21,7 @@ def read_hs300_weights():
     hs300.index=pd.to_datetime(hs300.index,format="%Y%m%d")
     return hs300   
 def shrink_cov(returns):
-    returns=returns.drpna()
+    returns=returns.dropna()
     cov = returns.cov(ddof=0)
     tp = np.diag(cov).mean()
     mui = pd.DataFrame(np.eye(cov.shape[0]), index=cov.index, columns=cov.columns)
@@ -52,14 +53,35 @@ def get_returns(con_code,start_date,end_date):
     dfs=pd.concat(dfs,ignore_index=True)
     dfs=dfs.pivot(index="trade_date",columns="ts_code",values="pct_chg")
     dfs=dfs.sort_index()/100
-    dfs.to_csv("data/hs300_returns_nearly.csv")
+    dfs.to_csv("data/hs300_returns.csv")
     return dfs
 
 def read_returns():
     returns=pd.read_csv("data/hs300_returns_nearly.csv",index_col=0)
     returns.index=pd.to_datetime(returns.index,format="%Y%m%d")
     return returns 
-    
+def cp_weight(cov,lowst=0,target=0,highst=1,mu=None,lam=0,old_w=0,slack_p=1000):  # pyright: ignore[reportUnusedParameter]
+    n=cov.shape[0]
+    w=cp.Variable(n)
+    constraints=[]
+    slack=cp.Variable(nonneg=True)
+    turnover=cp.norm(w-old_w,1)
+    objective=cp.quad_form(w,cov)+lam*turnover+slack*slack_p
+    high=w<=highst
+    constraints.append(high)
+    target=target/252
+    if mu is not None:
+        mu=np.asarray(mu,dtype=float).mean(axis=0)
+        ys=mu@w+slack>=target
+        constraints.append(ys)
+    equal=cp.sum(w)==1
+    low=w>=lowst
+    constraints.append(equal)
+    constraints.append(low)
+    problem=cp.Problem(cp.Minimize(objective),constraints)
+    problem.solve()
+    return w.value
+
 def skewness(r):
     """
     Alternative to scipy.stats.skew()
@@ -665,3 +687,37 @@ def weight_erc(r, cov_estimator=sample_cov, **kwargs):
     """
     est_cov = cov_estimator(r, **kwargs)
     return equal_risk_contributions(est_cov)
+def backtest_hs300(returns,w,start_date="2024-01",end_date="2026-05",n=100,estimation_window=60,future_window=60, weighting=weight_gmv, **kwargs):
+    r=returns.loc[start_date:end_date]
+    n_periods = r.shape[0]
+    pieces=[]
+    vols=[]
+    conds=[]
+    for i in range(n_periods):
+        last_month=r.index[i].to_period('M')-1
+        asof=w.index[w.index.to_period("M")==last_month]
+        tp=w.loc[asof]
+        tp=tp.squeeze().dropna().sort_values(ascending=False)
+        r_tp=returns.loc[:r.index[i],tp.index].iloc[-(estimation_window+1):-1]
+        pf=(r_tp.isna().mean()==0)
+        r_tp=r_tp.loc[:,pf]
+        r_tp=r_tp.iloc[:,:n]
+        cov=kwargs["cov_estimator"](r_tp)
+        conds.append(np.linalg.cond(np.asarray(cov,dtype=float)))
+        raw=weighting(r_tp,**kwargs)
+        wt=pd.Series(np.asarray(raw),index=r_tp.columns)
+        wt.name=r.index[i]
+        pos=returns.index.get_loc(r.index[i])
+        future=returns.iloc[pos:pos+future_window]
+        port=future.mul(wt,axis=1).sum(axis=1)
+        vol=port.std()*((252)**0.5)
+        vols.append(vol)
+        pieces.append(wt)
+    weights = pd.concat(pieces,axis=1).T
+    vols=pd.Series(vols,index=r.index,name="vol")
+    conds=pd.Series(conds,index=r.index,name="cond")
+    rt = (weights * r).sum(axis="columns",  min_count=1)
+    out=pd.DataFrame({"ret":rt,"vol":vols,"cond":conds})
+    out.to_csv(f"data/drill2_{kwargs['cov_estimator'].__name__}_{start_date}_{end_date}.csv")
+    return out
+
