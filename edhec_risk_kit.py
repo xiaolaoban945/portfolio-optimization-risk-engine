@@ -1,10 +1,31 @@
+"""CSI 300 portfolio experiments.
+
+Notebook entry points in this file:
+- shrink_cov: simplified Ledoit-Wolf shrinkage toward a scaled identity
+- equal_risk_contributions, risk_contribution: equal-risk-contribution weights
+- cp_weight: long-only variance minimization with an optional return target
+- backtest_hs300: rolling comparison of covariance estimators
+
+The notebooks read cached frames under data/. get_hs300_weight and get_returns
+download from Tushare and require the TUSHARE_TOKEN environment variable.
+"""
+import os
 import pandas as pd
 import numpy as np
 import tushare as ts
 import time as time
 import cvxpy as cp
+
+def _tushare_pro():
+    token = os.environ.get("TUSHARE_TOKEN")
+    if not token:
+        raise RuntimeError(
+            "TUSHARE_TOKEN is not set. The notebooks read cached CSVs and do not need it."
+        )
+    return ts.pro_api(token)
+
 def get_hs300_weight(start_year=2016,end_year=2026):
-    pro = ts.pro_api('8a4a1a62697c04aad61a689b7e0c73d0ab9cd7a720de7557667fe9b1')
+    pro = _tushare_pro()
     dfs=[]
     for year in range(start_year,end_year+1):
         df = pro.index_weight(index_code='399300.SZ',start_date=f"{year}0101",end_date=f"{year}1231" )
@@ -43,7 +64,7 @@ def shrink_cov(returns):
     return cov_aj
 def get_returns(con_code,start_date,end_date):
     n=len(con_code)
-    pro = ts.pro_api('8a4a1a62697c04aad61a689b7e0c73d0ab9cd7a720de7557667fe9b1')
+    pro = _tushare_pro()
     dfs=[]
     for i in range(0,n):
         df = pro.daily(ts_code=con_code[i], start_date=start_date, end_date=end_date)
@@ -79,7 +100,9 @@ def cp_weight(cov,lowst=0,target=0,highst=1,mu=None,lam=0,old_w=0,slack_p=1000):
     constraints.append(equal)
     constraints.append(low)
     problem=cp.Problem(cp.Minimize(objective),constraints)
-    problem.solve()
+    # Default OSQP tolerances stop early on this slack formulation and can
+    # return a feasible weight whose variance is not the minimum.
+    problem.solve(solver=cp.CLARABEL)
     return w.value
 
 def skewness(r):
